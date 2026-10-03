@@ -2,11 +2,19 @@
  * 第 10 节验收标准的自动化断言（在浏览器里跑，结果直接显示在「裁切参数」页）
  */
 import { validateCutSequence, type CutLine, type Rect } from './guillotine'
-import { BUILTIN_PAPERS, BUILTIN_PHOTO_SIZES } from './library'
+import { BUILTIN_PAPERS, BUILTIN_PHOTO_SIZES, groupsFromTask, optionsFromTask } from './library'
 import { pack, sheetsFromPlacements, usableRegion, type PackGroup, type PackOptions } from './packer'
 import { buildPdf } from './pdf'
+import {
+  applyRevision,
+  buildRevision,
+  diffParams,
+  optionsOfParams,
+  snapshotRevision,
+  summarizeSheets,
+} from './revision'
 import { MM_TO_PT, mmToPt, mmToPx, pxToMm } from './units'
-import type { Paper, Placement, Sheet } from './types'
+import type { Paper, Placement, Sheet, Task } from './types'
 
 export interface AssertionResult {
   id: string
@@ -482,6 +490,164 @@ function assertPerformance(): AssertionResult {
   }
 }
 
+/** ⑧ 修订与重排：改参数存版本、手工位置保住/列清单、退回后按退回版恢复 */
+function assertRevision(): AssertionResult {
+  const t0 = performance.now()
+  const problems: string[] = []
+  const paper = BUILTIN_PAPERS.find((p) => p.id === 'p5x7') as Paper
+  const task: Task = {
+    id: 'rev-selftest',
+    name: '自检',
+    paperId: paper.id,
+    items: [
+      {
+        id: 'i1',
+        sizeId: 's1cun',
+        qty: 8,
+        rotateAllowed: false,
+        repeatSamePhoto: true,
+        keepTogether: false,
+      },
+    ],
+    gapMm: 0,
+    kerfMm: 0.5,
+    safeEdgeMm: 3,
+    allowRotate: false,
+    headerText: '',
+    footerText: '',
+    createdAt: 0,
+  }
+  const out = pack(groupsFromTask(task, BUILTIN_PHOTO_SIZES), optionsFromTask(task, paper))
+  if (out.error) {
+    return { id: 'revision', title: '⑧ 修订与重排', pass: false, detail: `排样失败：${out.error}`, ms: 0 }
+  }
+  task.result = out.result
+  // 一组人工摆法（等价于手工微调后的状态）：x = 8/37/65/93.5，y = 12/57，两行四列
+  const spread: Placement[] = []
+  for (let i = 0; i < 8; i++) {
+    const col = i % 4
+    const row = Math.floor(i / 4)
+    spread.push({
+      itemId: 'i1',
+      sheetIndex: 0,
+      x: [8, 37, 65, 93.5][col],
+      y: 12 + row * 45,
+      w: 25,
+      h: 35,
+      rotated: false,
+      seq: i + 1,
+    })
+  }
+  task.manual = { placements: spread, valid: true, message: '', validationMs: 0, stepCount: 0 }
+  const all = BUILTIN_PAPERS
+
+  // v1 快照：8 张 1 寸 → 1 张 5×7，总价 = 1 张纸单价
+  const v1 = snapshotRevision(task, all, 1, '初始排样')
+  if (!v1) {
+    return {
+      id: 'revision',
+      title: '⑧ 修订与重排',
+      pass: false,
+      detail: 'v1 快照失败',
+      ms: Math.round(performance.now() - t0),
+    }
+  }
+  if (v1.summary.sheets !== 1) problems.push(`v1 应为 1 张纸，实际 ${v1.summary.sheets}`)
+  if (v1.summary.totalPhotos !== 8) problems.push(`v1 应为 8 张照片，实际 ${v1.summary.totalPhotos}`)
+  if (v1.summary.totalCents !== paper.priceCents) {
+    problems.push(`v1 总价应为 ${paper.priceCents} 分，实际 ${v1.summary.totalCents}`)
+  }
+
+  // 改安全边 3→8 重排：可用区变小但仍放得下 8 张，手工位置应全部保住
+  const params2 = { ...v1.params, safeEdgeMm: 8 }
+  const built2 = buildRevision(task, params2, BUILTIN_PHOTO_SIZES, all)
+  if (built2.error) {
+    problems.push(`安全边 8mm 重排失败：${built2.error}`)
+  } else {
+    if (built2.dropped.length) {
+      problems.push(`安全边 8mm 不应有保不住的位置，实际 ${built2.dropped.length} 个`)
+    }
+    if (!built2.manual || built2.keptCount !== 8) {
+      problems.push(`安全边 8mm 应保住全部 8 个手工位置，实际 ${built2.keptCount}`)
+    }
+    if (built2.movedCount <= 0) problems.push('安全边加大后应有位置被挪进新安全边')
+    // 参数差异必须指出「安全边 3mm→8mm」
+    const diffs = diffParams(v1.params, params2, all)
+    if (diffs.length !== 1 || diffs[0].label !== '安全边') {
+      problems.push(`参数差异应为「安全边」，实际 ${diffs.map((d) => d.label).join('/') || '无'}`)
+    }
+  }
+
+  // 换成 60×60mm 小自定义纸重排：大部分手工位置保不住，进清单并重新自动排
+  const params3 = {
+    ...v1.params,
+    paperId: 'custom',
+    customPaper: {
+      id: 'custom',
+      name: '自定义 60×60',
+      wMm: 60,
+      hMm: 60,
+      marginMm: 3,
+      priceCents: 50,
+      kind: 'sheet' as const,
+    },
+  }
+  const built3 = buildRevision(task, params3, BUILTIN_PHOTO_SIZES, all)
+  if (built3.error) {
+    problems.push(`小纸重排失败：${built3.error}`)
+  } else {
+    if (!built3.dropped.length) problems.push('换 60×60 小纸应有保不住的手工位置')
+    if (built3.dropped.some((d) => !d.reason)) problems.push('保不住的清单里缺少原因')
+    if (!built3.manual) {
+      problems.push('换小纸后应仍有手工版面（保住一部分 + 剩余重排）')
+    } else {
+      const total = built3.manual.placements.length
+      if (total !== 8) problems.push(`重排后照片总数应为 8，实际 ${total}`)
+      // 重排后的版面必须全部落在新安全边内且通过 guillotine 校验
+      const opts3 = optionsOfParams(params3, params3.customPaper as Paper)
+      const region = usableRegion(opts3)
+      const maxSheet = Math.max(...built3.manual.placements.map((p) => p.sheetIndex))
+      const check = sheetsFromPlacements(built3.manual.placements, opts3, maxSheet + 1)
+      if (check.errors.length) problems.push(`重排后的版面未通过校验：${check.errors[0]}`)
+      if (region) {
+        for (const p of built3.manual.placements) {
+          if (
+            p.x < region.x - EPS ||
+            p.y < region.y - EPS ||
+            p.x + p.w > region.x + region.w + EPS ||
+            p.y + p.h > region.y + region.h + EPS
+          ) {
+            problems.push(`#${p.seq} 超出新安全边`)
+            break
+          }
+        }
+      }
+      // 指标快照：张数 × 单价 = 总价
+      const sum = summarizeSheets(check.sheets, 50)
+      if (sum.totalCents !== sum.sheets * 50) problems.push('版本总价不等于 张数×单价')
+      if (sum.sheets <= 1) problems.push('60×60 小纸排 8 张 1 寸应多于 1 张纸')
+    }
+  }
+
+  // 退回：applyRevision 后任务顶层字段必须回到该版参数与结果
+  applyRevision(task, { ...v1, params: params2, id: 'rev-x', seq: 9 })
+  if (task.safeEdgeMm !== 8) problems.push('切换到安全边 8mm 版本后任务参数未更新')
+  applyRevision(task, v1)
+  if (task.safeEdgeMm !== 3) problems.push('退回 v1 后安全边未恢复为 3mm')
+  if (task.result !== v1.result) problems.push('退回 v1 后排样结果未恢复')
+  if ((task.manual?.placements.length ?? 0) !== 8) problems.push('退回 v1 后手工版面未恢复')
+
+  return {
+    id: 'revision',
+    title: '⑧ 修订与重排：改参数存版本、手工位置能保则保/保不住列清单、版本可退回',
+    pass: problems.length === 0,
+    detail: problems.length
+      ? problems.join('；')
+      : `安全边 3→8mm：8 个手工位置全部保住（${built2.movedCount} 个挪入新安全边）；换 60×60 小纸：${built3.dropped.length} 个保不住已列清单并重新自动排，版面仍全部通过 guillotine 校验；退回 v1 后参数/排样/手工版面均恢复`,
+    ms: Math.round(performance.now() - t0),
+  }
+}
+
 export async function runSelfTest(): Promise<AssertionResult[]> {
   const results: AssertionResult[] = []
   results.push(assertGuillotine())
@@ -501,5 +667,6 @@ export async function runSelfTest(): Promise<AssertionResult[]> {
     })
   }
   results.push(assertPerformance())
+  results.push(assertRevision())
   return results
 }

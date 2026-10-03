@@ -277,6 +277,7 @@ watch(
       <span class="badge">{{ sheets.length }} 张相纸</span>
       <span class="badge">{{ totalSteps }} 刀（未合并 {{ rawSteps }} 刀）</span>
       <div class="spacer"></div>
+      <button class="btn" @click="goto('revise')">修订与重排</button>
       <button class="btn" @click="goto('cut')">裁切步骤 →</button>
       <button class="btn primary" @click="goto('export')">导出 1:1 →</button>
     </div>

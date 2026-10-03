@@ -3,6 +3,7 @@ import NewTaskView from './views/NewTaskView.vue'
 import LayoutView from './views/LayoutView.vue'
 import CutView from './views/CutView.vue'
 import ExportView from './views/ExportView.vue'
+import ReviseView from './views/ReviseView.vue'
 import PapersView from './views/PapersView.vue'
 import SettingsView from './views/SettingsView.vue'
 
@@ -11,6 +12,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/layout/:id', name: 'layout', component: LayoutView, meta: { title: '排样预览' } },
   { path: '/cut/:id', name: 'cut', component: CutView, meta: { title: '裁切步骤' } },
   { path: '/export/:id', name: 'export', component: ExportView, meta: { title: '导出' } },
+  { path: '/revise/:id', name: 'revise', component: ReviseView, meta: { title: '修订与重排' } },
   { path: '/papers', name: 'papers', component: PapersView, meta: { title: '相纸与照片尺寸库' } },
   { path: '/settings', name: 'settings', component: SettingsView, meta: { title: '裁切参数' } },
   { path: '/:pathMatch(.*)*', redirect: '/' },

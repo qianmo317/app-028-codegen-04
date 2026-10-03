@@ -111,6 +111,60 @@ export interface CostReport {
   savedCents: number
 }
 
+/** 手工微调过的排样（存在时优先于自动排样结果） */
+export interface ManualState {
+  placements: Placement[]
+  valid: boolean
+  message: string
+  validationMs: number
+  stepCount: number
+}
+
+/** 一个版本定格的裁切参数与相纸（修订与重排的最小单元） */
+export interface RevisionParams {
+  paperId: string
+  /** 自定义相纸（paperId 为 'custom' 时生效） */
+  customPaper?: Paper
+  gapMm: number
+  kerfMm: number
+  safeEdgeMm: number
+  allowRotate: boolean
+}
+
+/** 一个版本的关键指标快照（张数 / 利用率 / 总价 / 刀数） */
+export interface RevisionSummary {
+  sheets: number
+  totalPhotos: number
+  avgUtilization: number
+  totalCents: number
+  cutSteps: number
+  rawCutSteps: number
+}
+
+/** 重排时保不住的手工位置（含原因） */
+export interface DroppedPlacement {
+  seq: number
+  itemId: string
+  reason: string
+}
+
+/** 一次修订存下的版本：参数 + 排样结果 + 指标快照，可退回 */
+export interface Revision {
+  id: string
+  /** 版本号（从 1 开始递增） */
+  seq: number
+  createdAt: number
+  /** 这一版改了什么（自动生成，如「隙距 0→2mm」） */
+  note: string
+  params: RevisionParams
+  summary: RevisionSummary
+  result: PackResult
+  /** 该版本生效的手工排样（含重排时保下来的位置） */
+  manual?: ManualState
+  /** 重排时保不住、被重新自动排的手工位置清单 */
+  droppedManual: DroppedPlacement[]
+}
+
 export interface Task {
   id: string
   name: string
@@ -126,14 +180,11 @@ export interface Task {
   footerText: string
   createdAt: number
   /** 手工微调过的排样（存在时优先于自动排样结果） */
-  manual?: {
-    placements: Placement[]
-    valid: boolean
-    message: string
-    validationMs: number
-    stepCount: number
-  }
+  manual?: ManualState
   result?: PackResult
+  /** 修订历史：每改一次参数重排就存一版；顶层字段始终与当前版本同步 */
+  revisions?: Revision[]
+  currentRevisionId?: string
 }
 
 export interface Leftover {

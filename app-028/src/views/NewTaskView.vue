@@ -494,6 +494,7 @@ function taskPaperName(t: Task) {
                     <button class="btn small" @click="openTask(t, 'layout')">排样</button>
                     <button class="btn small" @click="openTask(t, 'cut')">裁切</button>
                     <button class="btn small" @click="openTask(t, 'export')">导出</button>
+                    <button class="btn small" @click="openTask(t, 'revise')">修订</button>
                     <button class="btn small danger" @click="deleteTask(t.id)">删除</button>
                   </div>
                 </td>
