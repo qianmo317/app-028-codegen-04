@@ -111,6 +111,52 @@ export interface CostReport {
   savedCents: number
 }
 
+export interface ManualLayout {
+  placements: Placement[]
+  valid: boolean
+  message: string
+  validationMs: number
+  stepCount: number
+}
+
+export interface RevisionParams {
+  paperId: string
+  /** 自定义相纸（paperId 为 'custom' 时生效） */
+  customPaper?: Paper
+  gapMm: number
+  kerfMm: number
+  safeEdgeMm: number
+}
+
+export interface RevisionMetrics {
+  paperName: string
+  sheets: number
+  totalPhotos: number
+  avgUtilization: number
+  totalCents: number
+  cutCount: number
+  rawCutCount: number
+  elapsedMs: number
+}
+
+export type RevisionReason = 'initial' | 'revise' | 'rollback'
+
+export interface TaskRevision {
+  id: string
+  number: number
+  createdAt: number
+  reason: RevisionReason
+  /** rollback 版本记录退回目标；普通修订记录上一版本 */
+  basedOnRevisionId?: string
+  rolledBackToNumber?: number
+  note: string
+  params: RevisionParams
+  /** 自动排样结果；存在手工快照时，manual 为当前生效版面 */
+  result: PackResult
+  manual?: ManualLayout
+  metrics: RevisionMetrics
+}
+
 export interface Task {
   id: string
   name: string
@@ -126,14 +172,10 @@ export interface Task {
   footerText: string
   createdAt: number
   /** 手工微调过的排样（存在时优先于自动排样结果） */
-  manual?: {
-    placements: Placement[]
-    valid: boolean
-    message: string
-    validationMs: number
-    stepCount: number
-  }
+  manual?: ManualLayout
   result?: PackResult
+  revisions: TaskRevision[]
+  currentRevisionId?: string
 }
 
 export interface Leftover {

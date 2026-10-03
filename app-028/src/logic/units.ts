@@ -47,7 +47,8 @@ export function formatMm(n: number, digits = 1): string {
 }
 
 export function formatCents(cents: number): string {
-  return `¥${(cents / 100).toFixed(2)}`
+  const sign = cents < 0 ? '-' : ''
+  return `${sign}¥${Math.abs(cents / 100).toFixed(2)}`
 }
 
 export function formatPercent(v: number, digits = 1): string {

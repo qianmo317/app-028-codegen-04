@@ -3,10 +3,12 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import SheetView from '../components/SheetView.vue'
 import UtilizationBar from '../components/UtilizationBar.vue'
+import RevisionPanel from '../components/RevisionPanel.vue'
 import {
   addLeftover,
   allPapers,
   allSizes,
+  currentRevision,
   getTask,
   makeThumbResolver,
   manualPlacementsOf,
@@ -25,6 +27,7 @@ const route = useRoute()
 const router = useRouter()
 
 const task = computed<Task | undefined>(() => getTask(String(route.params.id)))
+const revision = computed(() => (task.value ? currentRevision(task.value) : undefined))
 const activeSheet = ref(0)
 const selectedSeq = ref(-1)
 const dragState = ref<{ seq: number; x: number; y: number } | null>(null)
@@ -273,6 +276,7 @@ watch(
     <div class="row">
       <h1 style="margin: 0">{{ task.name }}</h1>
       <span class="badge brand">{{ paper.name }} {{ paper.wMm }}×{{ paper.hMm }}mm</span>
+      <span v-if="revision" class="badge ok">第 {{ revision.number }} 版 · {{ revision.reason === 'rollback' ? '退回版' : revision.reason === 'initial' ? '初始版' : '修订版' }}</span>
       <span class="badge">{{ totalPhotos }} 张照片</span>
       <span class="badge">{{ sheets.length }} 张相纸</span>
       <span class="badge">{{ totalSteps }} 刀（未合并 {{ rawSteps }} 刀）</span>
@@ -391,6 +395,8 @@ watch(
             <dd>{{ rawSteps }}</dd>
           </div>
         </div>
+
+        <RevisionPanel :task="task" />
 
         <div v-if="lowUtil" class="card">
           <h3>换纸试算</h3>

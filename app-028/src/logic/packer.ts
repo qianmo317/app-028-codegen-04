@@ -3,7 +3,7 @@
  * 空闲矩形用「整边切分（guillotine split）」维护，任何一次放置都只把剩余区域
  * 沿一条整边切成两个子矩形，因此结果天然满足「每一刀都能直线裁到底」。
  */
-import { EPS, planSheetCuts, toCutSteps, type Rect } from './guillotine'
+import { EPS, planSheetCuts, rectContains, toCutSteps, type Rect } from './guillotine'
 import { round } from './units'
 import type { PackResult, PackStats, Placement, Sheet, WasteRect } from './types'
 
@@ -29,12 +29,19 @@ export interface PackOptions {
 export interface PackOutput {
   result: PackResult
   error?: string
+  /** 手工保留照片：新编号 -> 原编号 */
+  preservedSeqByNewSeq?: Map<number, number>
+}
+
+interface AnchorPlacement extends Placement {
+  oldSeq?: number
 }
 
 interface PlacedRaw {
   itemId: string
   rect: Rect
   rotated: boolean
+  oldSeq?: number
 }
 
 export function usableRegion(opts: PackOptions): Rect | null {
@@ -212,6 +219,102 @@ interface Trial {
   rotated: boolean
 }
 
+interface AnchorSlot {
+  anchor: AnchorPlacement
+  slot: Rect
+}
+
+interface AnchorPartition {
+  region: Rect
+  anchor?: AnchorSlot
+}
+
+function rectsOverlap(a: Rect, b: Rect, eps = FIT_EPS): boolean {
+  return (
+    a.x < b.x + b.w - eps &&
+    b.x < a.x + a.w - eps &&
+    a.y < b.y + b.h - eps &&
+    b.y < a.y + a.h - eps
+  )
+}
+
+function anchorSlotsValid(list: AnchorSlot[], region: Rect): boolean {
+  if (list.some(({ slot }) => !rectContains(region, slot, FIT_EPS))) return false
+  for (let i = 0; i < list.length; i++) {
+    for (let j = i + 1; j < list.length; j++) {
+      if (rectsOverlap(list[i].slot, list[j].slot)) return false
+    }
+  }
+  return true
+}
+
+function partitionAnchorRegions(
+  region: Rect,
+  anchors: AnchorSlot[],
+): AnchorPartition[] | null {
+  if (!anchorSlotsValid(anchors, region)) return null
+  if (anchors.length === 0) return [{ region }]
+  if (anchors.length === 1) {
+    const a = anchors[0].slot
+    const out: AnchorPartition[] = []
+    if (a.y - region.y > FIT_EPS) out.push({ region: { x: region.x, y: region.y, w: region.w, h: a.y - region.y } })
+    const bottomY = a.y + a.h
+    if (region.y + region.h - bottomY > FIT_EPS) out.push({ region: { x: region.x, y: bottomY, w: region.w, h: region.y + region.h - bottomY } })
+    const midY = Math.max(region.y, a.y)
+    const bottom = Math.min(region.y + region.h, bottomY)
+    if (bottom - midY > FIT_EPS) {
+      if (a.x - region.x > FIT_EPS) out.push({ region: { x: region.x, y: midY, w: a.x - region.x, h: bottom - midY } })
+      const rightX = a.x + a.w
+      if (region.x + region.w - rightX > FIT_EPS) out.push({ region: { x: rightX, y: midY, w: region.x + region.w - rightX, h: bottom - midY } })
+    }
+    out.push({ region: { ...a }, anchor: anchors[0] })
+    return out
+  }
+
+  const trySplit = (axis: 'v' | 'h'): AnchorPartition[] | null => {
+    const coords = new Set<number>()
+    for (const { slot } of anchors) {
+      coords.add(axis === 'v' ? slot.x : slot.y)
+      coords.add(axis === 'v' ? slot.x + slot.w : slot.y + slot.h)
+    }
+    for (const at of coords) {
+      if (axis === 'v') {
+        if (at <= region.x + FIT_EPS || at >= region.x + region.w - FIT_EPS) continue
+      } else if (at <= region.y + FIT_EPS || at >= region.y + region.h - FIT_EPS) {
+        continue
+      }
+      const left: AnchorSlot[] = []
+      const right: AnchorSlot[] = []
+      let ok = true
+      for (const item of anchors) {
+        const lo = axis === 'v' ? item.slot.x : item.slot.y
+        const len = axis === 'v' ? item.slot.w : item.slot.h
+        if (lo + len <= at + FIT_EPS) left.push(item)
+        else if (lo >= at - FIT_EPS) right.push(item)
+        else {
+          ok = false
+          break
+        }
+      }
+      if (!ok || !left.length || !right.length) continue
+      const aRegion = axis === 'v'
+        ? { x: region.x, y: region.y, w: at - region.x, h: region.h }
+        : { x: region.x, y: region.y, w: region.w, h: at - region.y }
+      const bRegion = axis === 'v'
+        ? { x: at, y: region.y, w: region.x + region.w - at, h: region.h }
+        : { x: region.x, y: at, w: region.w, h: region.y + region.h - at }
+      const ap = partitionAnchorRegions(aRegion, left)
+      if (!ap) continue
+      const bp = partitionAnchorRegions(bRegion, right)
+      if (!bp) continue
+      return [...ap, ...bp]
+    }
+    return null
+  }
+
+  return trySplit('v') ?? trySplit('h')
+}
+
 function tryPlaceOne(free: Rect[], g: PackGroup, opts: PackOptions, m: number): Trial | null {
   const sw = g.photoW + 2 * m
   const sh = g.photoH + 2 * m
@@ -240,7 +343,11 @@ function tryPlaceMany(
   return out
 }
 
-export function pack(groups: PackGroup[], opts: PackOptions): PackOutput {
+export function pack(
+  groups: PackGroup[],
+  opts: PackOptions,
+  anchors: AnchorPlacement[] = [],
+): PackOutput {
   const started = performance.now()
   const region = usableRegion(opts)
   if (!region) {
@@ -251,7 +358,7 @@ export function pack(groups: PackGroup[], opts: PackOptions): PackOutput {
   }
   const m = (opts.kerfMm + opts.gapMm) / 2
 
-  const queue: PackGroup[] = groups
+  const remaining: PackGroup[] = groups
     .filter((g) => g.copies > 0)
     .map((g) => ({ ...g }))
     .sort((a, b) => {
@@ -263,7 +370,7 @@ export function pack(groups: PackGroup[], opts: PackOptions): PackOutput {
 
   // 单张都放不下 -> 直接给出边界提示
   const oversize: string[] = []
-  for (const g of queue) {
+  for (const g of remaining) {
     const sw = g.photoW + 2 * m
     const sh = g.photoH + 2 * m
     const canRot = opts.allowRotate && g.allowRotate
@@ -283,11 +390,104 @@ export function pack(groups: PackGroup[], opts: PackOptions): PackOutput {
     }
   }
 
+  const anchorBySheet = new Map<number, AnchorPlacement[]>()
+  for (const a of anchors) {
+    const list = anchorBySheet.get(a.sheetIndex) ?? []
+    list.push(a)
+    anchorBySheet.set(a.sheetIndex, list)
+  }
+
   const rawSheets: Array<{ placements: PlacedRaw[] }> = []
   let guard = 0
-  while (queue.some((g) => g.copies > 0) && guard++ < 20000) {
-    let free: Rect[] = [{ ...region }]
+  let sheetIndex = 0
+  while (
+    (remaining.some((g) => g.copies > 0) || anchorBySheet.has(sheetIndex)) &&
+    guard++ < 20000
+  ) {
+    const sheetAnchors = (anchorBySheet.get(sheetIndex) ?? [])
+      .filter((a) => remaining.some((g) => g.itemId === a.itemId && g.copies > 0))
+      .map((anchor) => ({
+        anchor,
+        slot: {
+          x: anchor.x - m,
+          y: anchor.y - m,
+          w: anchor.w + 2 * m,
+          h: anchor.h + 2 * m,
+        },
+      }))
+    const partition = sheetAnchors.length ? partitionAnchorRegions(region, sheetAnchors) : null
+    if (sheetAnchors.length && !partition) {
+      sheetIndex++
+      if (!anchorBySheet.has(sheetIndex) && !remaining.some((g) => g.copies > 0)) break
+      continue
+    }
+    let free: Rect[] = partition
+      ? partition.filter((part) => !part.anchor).map((part) => ({ ...part.region }))
+      : [{ ...region }]
     const placements: PlacedRaw[] = []
+
+    for (const part of partition ?? []) {
+      if (!part.anchor) continue
+      const a = part.anchor.anchor
+      const g = remaining.find((x) => x.itemId === a.itemId)
+      if (!g || g.copies <= 0) continue
+      placements.push({
+        itemId: a.itemId,
+        // 内部统一存「照片真实矩形」；构造切块时由 sheetsFromPlacements 外扩 m
+        rect: { x: a.x, y: a.y, w: a.w, h: a.h },
+        rotated: a.rotated,
+        oldSeq: a.oldSeq,
+      })
+      g.copies--
+    }
+
+    // 锚点存的是照片真实矩形，转成切块后再和自动切块一起做碰撞与排样
+    for (const p of placements) {
+      if (p.oldSeq !== undefined) {
+        p.rect = { x: p.rect.x - m, y: p.rect.y - m, w: p.rect.w + 2 * m, h: p.rect.h + 2 * m }
+      }
+    }
+
+    const overlapsPlaced = (r: Rect): boolean =>
+      placements.some((p) => rectsOverlap(p.rect, r, FIT_EPS))
+
+    function findBestFree(
+      freeRects: Rect[],
+      w: number,
+      h: number,
+      allowRotate: boolean,
+      isOverlap: (r: Rect) => boolean,
+    ): { idx: number; rotated: boolean; w: number; h: number } | null {
+      const candidates: Array<{ idx: number; rotated: boolean; w: number; h: number; score: number[] }> = []
+      const consider = (i: number, pw: number, ph: number, rot: boolean) => {
+        const f = freeRects[i]
+        if (pw > f.w + FIT_EPS || ph > f.h + FIT_EPS) return
+        const r = { x: f.x, y: f.y, w: pw, h: ph }
+        if (isOverlap(r)) return
+        const dw = f.w - pw
+        const dh = f.h - ph
+        candidates.push({ idx: i, rotated: rot, w: pw, h: ph, score: [Math.min(dw, dh), Math.max(dw, dh), f.w * f.h - pw * ph] })
+      }
+      for (let i = 0; i < freeRects.length; i++) {
+        consider(i, w, h, false)
+        if (allowRotate && Math.abs(w - h) > EPS) consider(i, h, w, true)
+      }
+      candidates.sort((a, b) => a.score[0] - b.score[0] || a.score[1] - b.score[1] || a.score[2] - b.score[2])
+      return candidates[0] ?? null
+    }
+
+    const nextAuto = (freeRects: Rect[], g: PackGroup): Trial | null =>
+      partition ? tryPlaceAutoIn(freeRects, g) : tryPlaceOne(freeRects, g, opts, m)
+
+    function tryPlaceAutoIn(freeRects: Rect[], g: PackGroup): Trial | null {
+      const sw = g.photoW + 2 * m
+      const sh = g.photoH + 2 * m
+      const fit = findBestFree(freeRects, sw, sh, opts.allowRotate && g.allowRotate, overlapsPlaced)
+      if (!fit) return null
+      const trial = freeRects.slice()
+      const placed = splitPlace(trial, fit.idx, fit.w, fit.h)
+      return { free: trial, placed, rotated: fit.rotated }
+    }
 
     const commit = (t: Trial, g: PackGroup) => {
       free = t.free
@@ -299,44 +499,66 @@ export function pack(groups: PackGroup[], opts: PackOptions): PackOutput {
       progress = false
       // 不拆散：若该组能整组放进空纸、却放不进当前剩余空间，则结束当前纸另起一张
       if (placements.length > 0) {
-        const blocked = queue.some(
+        const canPlaceMany = (g: PackGroup): boolean => {
+          let cur = free
+          for (let i = 0; i < g.copies; i++) {
+            const t = nextAuto(cur, g)
+            if (!t) return false
+            cur = t.free
+          }
+          return true
+        }
+        const blocked = remaining.some(
           (g) =>
             g.copies > 1 &&
             g.keepTogether &&
-            !tryPlaceMany(free, g, g.copies, opts, m) &&
+            !canPlaceMany(g) &&
             tryPlaceMany([{ ...region }], g, g.copies, opts, m) !== null,
         )
         if (blocked) break
       }
-      for (const g of queue) {
+      for (const g of remaining) {
         if (g.copies <= 1 || !g.keepTogether) continue
-        const many = tryPlaceMany(free, g, g.copies, opts, m)
-        if (many) {
-          for (const t of many) commit(t, g)
+        const trials: Trial[] = []
+        let cur = free
+        for (let i = 0; i < g.copies; i++) {
+          const t = nextAuto(cur, g)
+          if (!t) break
+          trials.push(t)
+          cur = t.free
+        }
+        if (trials.length === g.copies) {
+          for (const t of trials) commit(t, g)
           g.copies = 0
           progress = true
         }
       }
-      for (const g of queue) {
+      for (const g of remaining) {
         if (g.copies <= 0) continue
-        let t = tryPlaceOne(free, g, opts, m)
+        let t = nextAuto(free, g)
         while (t) {
           commit(t, g)
           g.copies--
           progress = true
           if (g.copies <= 0) break
-          t = tryPlaceOne(free, g, opts, m)
+          t = nextAuto(free, g)
         }
       }
       if (free.length > 400) {
         free = free.filter((r) => r.w > 0.5 && r.h > 0.5)
       }
     }
-    if (placements.length === 0) break
+    if (placements.length === 0) {
+      sheetIndex++
+      if (!anchorBySheet.has(sheetIndex) && !remaining.some((g) => g.copies > 0)) break
+      continue
+    }
     rawSheets.push({ placements })
+    sheetIndex++
   }
 
   // 组装：按「从上到下、从左到右」编号
+  const preservedSeqByNewSeq = new Map<number, number>()
   const rawPlacements: Placement[] = []
   let seq = 0
   const sheetOfItem = new Map<string, Set<number>>()
@@ -349,6 +571,7 @@ export function pack(groups: PackGroup[], opts: PackOptions): PackOutput {
       )
     for (const p of ordered) {
       seq += 1
+      if (p.oldSeq !== undefined) preservedSeqByNewSeq.set(seq, p.oldSeq)
       // 排样器放置的是「切块」（照片 + 刀宽/隙距补偿），这里换算回照片实际矩形
       rawPlacements.push({
         itemId: p.itemId,
@@ -369,7 +592,13 @@ export function pack(groups: PackGroup[], opts: PackOptions): PackOutput {
     }
   }
 
-  const { sheets } = sheetsFromPlacements(rawPlacements, opts, rawSheets.length)
+  const { sheets, errors } = sheetsFromPlacements(rawPlacements, opts, rawSheets.length)
+  if (errors.length && anchors.length) {
+    return {
+      error: errors[0],
+      result: emptyResult(performance.now() - started),
+    }
+  }
 
   const keepTogetherBroken: string[] = []
   for (const g of groups) {
@@ -388,5 +617,5 @@ export function pack(groups: PackGroup[], opts: PackOptions): PackOutput {
     elapsedMs: round(performance.now() - started, 2),
     keepTogetherBroken,
   }
-  return { result: { sheets, stats } }
+  return { result: { sheets, stats }, preservedSeqByNewSeq }
 }

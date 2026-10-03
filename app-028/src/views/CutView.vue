@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import SheetView from '../components/SheetView.vue'
 import RulerScale from '../components/RulerScale.vue'
-import { allPapers, getTask, makeThumbResolver, photoVersion, sheetsOf } from '../store'
+import { allPapers, currentRevision, getTask, makeThumbResolver, photoVersion, sheetsOf } from '../store'
 import { resolvePaper } from '../logic/library'
 import type { CutStep, Task } from '../logic/types'
 
@@ -11,6 +11,7 @@ const route = useRoute()
 const router = useRouter()
 
 const task = computed<Task | undefined>(() => getTask(String(route.params.id)))
+const revision = computed(() => (task.value ? currentRevision(task.value) : undefined))
 const paper = computed(() => (task.value ? resolvePaper(task.value, allPapers.value) : allPapers.value[0]))
 const sheets = computed(() => (task.value ? sheetsOf(task.value) : []))
 const activeSheet = ref(0)
@@ -111,6 +112,7 @@ function goto(routeName: string) {
     <div class="row no-print">
       <h1 style="margin: 0">裁切步骤</h1>
       <span class="badge brand">{{ task.name }}</span>
+      <span v-if="revision" class="badge ok">第 {{ revision.number }} 版</span>
       <span class="badge">{{ sheets.length }} 张相纸</span>
       <span class="badge">
         本张 {{ totalSteps }} 刀（未合并 {{ sheet?.rawCutCount ?? 0 }} 刀）

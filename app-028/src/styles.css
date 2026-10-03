@@ -338,6 +338,15 @@ table.data th.num {
 table.data tr:hover td {
   background: #fbfcfe;
 }
+table.data tr.current-rev td {
+  background: var(--ok-soft);
+}
+table.data tr.changed td {
+  background: var(--warn-soft);
+}
+.compare-table td:last-child {
+  font-weight: 600;
+}
 
 /* ---------- 徽标 / 提示 ---------- */
 .badge {

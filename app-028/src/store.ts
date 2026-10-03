@@ -10,17 +10,27 @@ import {
   resolvePaper,
 } from './logic/library'
 import { pack, sheetsFromPlacements } from './logic/packer'
+import {
+  metricsFromResult,
+  previewRevision,
+  revisionPaper,
+  revisionParams,
+  type RevisionPreview,
+} from './logic/revision'
 import { loadJSON, saveJSON } from './logic/storage'
 import type {
   Leftover,
+  ManualLayout,
   Paper,
   PaperTemplate,
   PhotoRef,
   PhotoSize,
   Placement,
+  RevisionParams,
   Settings,
   Sheet,
   Task,
+  TaskRevision,
 } from './logic/types'
 
 const KEY = {
@@ -51,9 +61,39 @@ watch(settings, (v) => saveJSON(KEY.settings, v), { deep: true })
 watch(tasks, (v) => saveJSON(KEY.tasks, v), { deep: true })
 watch(leftovers, (v) => saveJSON(KEY.leftovers, v), { deep: true })
 
+function makeInitialRevision(task: Task): TaskRevision | undefined {
+  if (!task.result) return undefined
+  const paper = resolvePaper(task, allPapers.value)
+  const revision: TaskRevision = {
+    id: newId('rev'),
+    number: 1,
+    createdAt: task.createdAt,
+    reason: 'initial',
+    note: '初始排样',
+    params: revisionParams(task),
+    result: task.result,
+    manual: task.manual,
+    metrics: metricsFromResult(paper, task.result),
+  }
+  return revision
+}
+
+/** 旧版本任务迁移为带修订历史的数据结构 */
+function migrateTask(task: Task): Task {
+  if (task.revisions?.length) return task
+  const revision = makeInitialRevision(task)
+  return {
+    ...task,
+    revisions: revision ? [revision] : [],
+    currentRevisionId: revision?.id,
+  }
+}
+
 export const allPapers = computed<Paper[]>(() => [...BUILTIN_PAPERS, ...customPapers.value])
 export const allSizes = computed<PhotoSize[]>(() => [...BUILTIN_PHOTO_SIZES, ...customSizes.value])
 export const templates = computed<PaperTemplate[]>(() => BUILTIN_TEMPLATES)
+
+tasks.value = tasks.value.map(migrateTask)
 
 /** 照片文件只在本机内存里保留，绝不写入存储、绝不上传 */
 const photoCache = new Map<string, { url: string; ref: PhotoRef }>()
@@ -118,6 +158,36 @@ export function getTask(id: string): Task | undefined {
   return tasks.value.find((t) => t.id === id)
 }
 
+export function currentRevision(task: Task): TaskRevision | undefined {
+  return task.revisions.find((r) => r.id === task.currentRevisionId) ?? task.revisions[task.revisions.length - 1]
+}
+
+export function revisionAt(task: Task, id: string | undefined): TaskRevision | undefined {
+  if (!id) return currentRevision(task)
+  return task.revisions.find((r) => r.id === id)
+}
+
+function nextRevisionNumber(task: Task): number {
+  return Math.max(0, ...task.revisions.map((r) => r.number)) + 1
+}
+
+function applyRevisionToTask(task: Task, revision: TaskRevision): void {
+  task.paperId = revision.params.paperId
+  task.customPaper = revision.params.customPaper ? { ...revision.params.customPaper } : undefined
+  task.gapMm = revision.params.gapMm
+  task.kerfMm = revision.params.kerfMm
+  task.safeEdgeMm = revision.params.safeEdgeMm
+  task.result = revision.result
+  task.manual = revision.manual ? { ...revision.manual, placements: revision.manual.placements.map((p) => ({ ...p })) } : undefined
+  task.currentRevisionId = revision.id
+}
+
+function appendRevision(task: Task, revision: TaskRevision): void {
+  task.revisions.push(revision)
+  applyRevisionToTask(task, revision)
+  touch()
+}
+
 export function createTask(partial: Partial<Task> = {}): Task {
   const task: Task = {
     id: newId('task'),
@@ -132,6 +202,7 @@ export function createTask(partial: Partial<Task> = {}): Task {
     headerText: partial.headerText ?? '',
     footerText: partial.footerText ?? '',
     createdAt: Date.now(),
+    revisions: [],
   }
   tasks.value.unshift(task)
   return task
@@ -160,23 +231,60 @@ export function runPack(task: Task): string | undefined {
   }
   task.result = out.result
   task.manual = undefined
+  const revision: TaskRevision = {
+    id: newId('rev'),
+    number: nextRevisionNumber(task),
+    createdAt: Date.now(),
+    reason: 'initial',
+    note: '初始排样',
+    params: revisionParams(task),
+    result: out.result,
+    metrics: metricsFromResult(paper, out.result),
+  }
+  task.revisions = [revision]
+  task.currentRevisionId = revision.id
   touch()
   return undefined
 }
 
 /** 当前生效的相纸版面：手工微调优先于自动排样 */
 export function sheetsOf(task: Task): Sheet[] {
-  if (task.manual) {
+  const revision = currentRevision(task)
+  if (!revision) return []
+  if (revision.manual) {
     const paper = resolvePaper(task, allPapers.value)
-    const count = Math.max(1, task.result?.sheets.length ?? 1)
-    return sheetsFromPlacements(task.manual.placements, optionsFromTask(task, paper), count).sheets
+    const count = Math.max(1, revision.result.sheets.length)
+    return sheetsFromPlacements(revision.manual.placements, optionsFromTask(task, paper), count).sheets
   }
-  return task.result?.sheets ?? []
+  return revision.result.sheets
+}
+
+export function sheetsOfRevision(task: Task, revisionId: string): Sheet[] {
+  const revision = revisionAt(task, revisionId)
+  if (!revision) return []
+  if (revision.manual) {
+    const paper = revisionPaper(revision.params, allPapers.value)
+    const probe = {
+      ...task,
+      paperId: revision.params.paperId,
+      customPaper: revision.params.customPaper,
+      gapMm: revision.params.gapMm,
+      kerfMm: revision.params.kerfMm,
+      safeEdgeMm: revision.params.safeEdgeMm,
+    }
+    return sheetsFromPlacements(
+      revision.manual.placements,
+      optionsFromTask(probe, paper),
+      Math.max(1, revision.result.sheets.length),
+    ).sheets
+  }
+  return revision.result.sheets
 }
 
 export function manualPlacementsOf(task: Task): Placement[] {
-  if (task.manual) return task.manual.placements
-  return (task.result?.sheets ?? []).flatMap((s) => s.placements)
+  const revision = currentRevision(task)
+  if (revision?.manual) return revision.manual.placements
+  return revision?.result.sheets.flatMap((s) => s.placements) ?? []
 }
 
 /** 写入手工微调结果并做增量校验（不重新排样） */
@@ -187,7 +295,7 @@ export function setManual(task: Task, placements: Placement[]): void {
   const { sheets, errors } = sheetsFromPlacements(placements, optionsFromTask(task, paper), count)
   const ms = performance.now() - t0
   const stepCount = sheets.reduce((acc, s) => acc + s.cutSteps.length, 0)
-  task.manual = {
+  const manual: ManualLayout = {
     placements,
     valid: errors.length === 0,
     message: errors.length
@@ -196,12 +304,79 @@ export function setManual(task: Task, placements: Placement[]): void {
     validationMs: Math.round(ms * 100) / 100,
     stepCount,
   }
+  task.manual = manual
+  const revision = currentRevision(task)
+  if (revision) {
+    revision.manual = manual
+    if (manual.valid) revision.metrics = metricsFromResult(paper, { sheets, stats: revision.result.stats })
+  }
   touch()
 }
 
 export function resetManual(task: Task): void {
   task.manual = undefined
+  const revision = currentRevision(task)
+  if (revision) {
+    revision.manual = undefined
+    const paper = resolvePaper(task, allPapers.value)
+    revision.metrics = metricsFromResult(paper, revision.result)
+  }
   touch()
+}
+
+function cloneRevision(revision: TaskRevision): TaskRevision {
+  return JSON.parse(JSON.stringify(revision)) as TaskRevision
+}
+
+export function previewTaskRevision(
+  task: Task,
+  params: RevisionParams,
+): { ok: true; preview: RevisionPreview } | { ok: false; error: string } {
+  return previewRevision(task, params, allPapers.value, allSizes.value)
+}
+
+export function reviseTask(task: Task, params: RevisionParams, note?: string): string | undefined {
+  const current = currentRevision(task)
+  const check = previewTaskRevision(task, params)
+  if (!check.ok) return check.error
+  const { preview } = check
+  const paper = revisionPaper(params, allPapers.value)
+  const revision: TaskRevision = {
+    id: newId('rev'),
+    number: nextRevisionNumber(task),
+    createdAt: Date.now(),
+    reason: 'revise',
+    basedOnRevisionId: current?.id,
+    note: note?.trim() || '参数修订并重排',
+    params: {
+      ...params,
+      customPaper: params.customPaper ? { ...params.customPaper } : undefined,
+    },
+    result: preview.result,
+    manual: preview.manual,
+    metrics: metricsFromResult(paper, preview.result),
+  }
+  appendRevision(task, revision)
+  return undefined
+}
+
+export function rollbackTask(task: Task, revisionId: string): string | undefined {
+  const target = task.revisions.find((r) => r.id === revisionId)
+  const current = currentRevision(task)
+  if (!target || !current || target.id === current.id) return '请选择一个历史版本'
+  const copy = cloneRevision(target)
+  const revision: TaskRevision = {
+    ...copy,
+    id: newId('rev'),
+    number: nextRevisionNumber(task),
+    createdAt: Date.now(),
+    reason: 'rollback',
+    basedOnRevisionId: current.id,
+    rolledBackToNumber: target.number,
+    note: `退回到第 ${target.number} 版`,
+  }
+  appendRevision(task, revision)
+  return undefined
 }
 
 export function addCustomPaper(p: Omit<Paper, 'id'>): Paper {

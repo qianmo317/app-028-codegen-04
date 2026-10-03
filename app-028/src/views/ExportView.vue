@@ -6,6 +6,7 @@ import SheetView from '../components/SheetView.vue'
 import {
   allPapers,
   allSizes,
+  currentRevision,
   getTask,
   makePhotoResolver,
   makeThumbResolver,
@@ -25,6 +26,7 @@ const route = useRoute()
 const router = useRouter()
 
 const task = computed<Task | undefined>(() => getTask(String(route.params.id)))
+const revision = computed(() => (task.value ? currentRevision(task.value) : undefined))
 const paper = computed(() => (task.value ? resolvePaper(task.value, allPapers.value) : allPapers.value[0]))
 const sheets = computed(() => (task.value ? sheetsOf(task.value) : []))
 const valid = computed(() => !task.value?.manual || task.value.manual.valid)
@@ -41,6 +43,12 @@ const thumbs = computed(() => {
 function photoResolver() {
   void photoVersion.value
   return task.value ? makePhotoResolver(task.value, sheets.value) : () => undefined
+}
+
+function fileBase(suffix: string): string {
+  const t = task.value
+  if (!t) return suffix
+  return `${t.name}-v${revision.value?.number ?? 1}-${suffix}`
 }
 
 function sizeLabelOf(p: Placement): string {
@@ -77,7 +85,7 @@ async function exportPdf() {
       sizeLabelOf,
       onProgress: (m) => (message.value = m),
     })
-    downloadBlob(blob, `${task.value!.name}-1to1.pdf`)
+    downloadBlob(blob, fileBase('1to1.pdf'))
     message.value = `PDF 已导出（${(blob.size / 1024).toFixed(0)}KB，${sheets.value.length + 1} 页）`
   } catch (e) {
     message.value = `PDF 导出失败：${e instanceof Error ? e.message : String(e)}`
@@ -99,7 +107,7 @@ async function exportPng(index: number) {
       photoOf: photoResolver(),
       sizeLabelOf,
     })
-    downloadBlob(blob, `${task.value!.name}-sheet${index + 1}-${dpi.value}dpi.png`)
+    downloadBlob(blob, fileBase(`sheet${index + 1}-${dpi.value}dpi.png`))
     message.value = `第 ${index + 1} 张 PNG 已导出（${dpi.value}dpi，1:1）`
   } catch (e) {
     message.value = `PNG 导出失败：${e instanceof Error ? e.message : String(e)}`
@@ -122,7 +130,7 @@ async function exportAllPng() {
         photoOf: photoResolver(),
         sizeLabelOf,
       })
-      downloadBlob(blob, `${task.value!.name}-sheet${i + 1}-${dpi.value}dpi.png`)
+      downloadBlob(blob, fileBase(`sheet${i + 1}-${dpi.value}dpi.png`))
       await new Promise((r) => setTimeout(r, 250))
     }
     message.value = `已导出 ${sheets.value.length} 张 1:1 PNG（${dpi.value}dpi）`
@@ -142,7 +150,7 @@ function exportCutList() {
     }
     return ''
   })
-  downloadBlob(csvBlob(rows), `${task.value!.name}-切割清单.csv`)
+  downloadBlob(csvBlob(rows), fileBase('切割清单.csv'))
   message.value = '切割清单 CSV 已导出'
 }
 
@@ -152,6 +160,7 @@ function exportCost() {
   if (!t || !c) return
   const rows: Array<Array<string | number>> = [
     ['任务', t.name],
+    ['版本', revision.value ? `第 ${revision.value.number} 版（${revision.value.note}）` : '当前版本'],
     ['相纸', c.paperName],
     ['相纸单价（元）', (paper.value.priceCents / 100).toFixed(2)],
     ['用纸张数', c.sheets],
@@ -171,7 +180,7 @@ function exportCost() {
       rows.push([p.seq, s.index + 1, sizeLabelOf(p), p.w, p.h, p.rotated ? '90°' : '无'])
     }
   }
-  downloadBlob(csvBlob(rows), `${task.value!.name}-成本表.csv`)
+  downloadBlob(csvBlob(rows), fileBase('成本表.csv'))
   message.value = '成本表 CSV 已导出'
 }
 
@@ -190,6 +199,7 @@ function printView() {
     <div class="row no-print">
       <h1 style="margin: 0">导出与打印</h1>
       <span class="badge brand">{{ task.name }}</span>
+      <span v-if="revision" class="badge ok">第 {{ revision.number }} 版</span>
       <span class="badge">{{ sheets.length }} 张相纸</span>
       <div class="spacer"></div>
       <button class="btn" @click="router.push(`/cut/${task.id}`)">← 裁切步骤</button>

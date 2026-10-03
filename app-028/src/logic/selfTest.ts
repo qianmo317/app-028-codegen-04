@@ -4,9 +4,10 @@
 import { validateCutSequence, type CutLine, type Rect } from './guillotine'
 import { BUILTIN_PAPERS, BUILTIN_PHOTO_SIZES } from './library'
 import { pack, sheetsFromPlacements, usableRegion, type PackGroup, type PackOptions } from './packer'
+import { previewRevision } from './revision'
 import { buildPdf } from './pdf'
 import { MM_TO_PT, mmToPt, mmToPx, pxToMm } from './units'
-import type { Paper, Placement, Sheet } from './types'
+import type { Paper, Placement, Sheet, Task } from './types'
 
 export interface AssertionResult {
   id: string
@@ -373,6 +374,7 @@ async function assertExport1to1(): Promise<AssertionResult> {
     headerText: '自检页眉',
     footerText: '2026-09-20',
     createdAt: 0,
+    revisions: [],
   }
   const blob = await buildPdf({
     task,
@@ -482,6 +484,109 @@ function assertPerformance(): AssertionResult {
   }
 }
 
+/** ⑧ 修订重排：手工位置能按新安全边/间隙保留；保不住的照片必须列入清单 */
+function assertRevisionPreservation(): AssertionResult {
+  const t0 = performance.now()
+  const problems: string[] = []
+  const paper = BUILTIN_PAPERS.find((p) => p.id === 'p5x7') as Paper
+  const size = BUILTIN_PHOTO_SIZES.find((s) => s.id === 's1cun')!
+  const opts: PackOptions = {
+    paperW: paper.wMm,
+    paperH: paper.hMm,
+    marginMm: paper.marginMm,
+    safeEdgeMm: 3,
+    gapMm: 0,
+    kerfMm: 0.5,
+    allowRotate: false,
+  }
+  const initial = pack(
+    [{ itemId: 'a', copies: 8, photoW: size.wMm, photoH: size.hMm, allowRotate: false, keepTogether: true }],
+    opts,
+  )
+  if (initial.error) {
+    return {
+      id: 'revision',
+      title: '⑧ 修订重排：手工位置按新参数保留，保不住的列入清单',
+      pass: false,
+      detail: initial.error,
+      ms: 0,
+    }
+  }
+  const placements = initial.result.sheets.flatMap((s) => s.placements)
+  const rebuilt = sheetsFromPlacements(placements, opts, 1)
+  const task: Task = {
+    id: 'revision-test',
+    name: '修订自检',
+    paperId: paper.id,
+    items: [
+      {
+        id: 'a',
+        sizeId: size.id,
+        qty: 8,
+        rotateAllowed: false,
+        repeatSamePhoto: true,
+        keepTogether: true,
+      },
+    ],
+    gapMm: 0,
+    kerfMm: 0.5,
+    safeEdgeMm: 3,
+    allowRotate: false,
+    headerText: '',
+    footerText: '',
+    createdAt: 0,
+    result: initial.result,
+    manual: {
+      placements,
+      valid: rebuilt.errors.length === 0,
+      message: rebuilt.errors[0] ?? 'ok',
+      validationMs: 0,
+      stepCount: rebuilt.sheets.reduce((a, s) => a + s.cutSteps.length, 0),
+    },
+    revisions: [],
+  }
+  const revised = previewRevision(
+    task,
+    { paperId: paper.id, gapMm: 2, kerfMm: 0.5, safeEdgeMm: 4 },
+    BUILTIN_PAPERS,
+    BUILTIN_PHOTO_SIZES,
+  )
+  if (!revised.ok) problems.push(`重排失败：${revised.error}`)
+  else {
+    if (revised.preview.preserved.length !== 8) {
+      problems.push(`8 个原手工位置只保留 ${revised.preview.preserved.length} 个`)
+    }
+    if (revised.preview.lostSeqs.length !== 0) {
+      problems.push(`不应丢失的位置被列为丢失：${revised.preview.lostSeqs.join(',')}`)
+    }
+    const region = usableRegion({ ...opts, gapMm: 2, safeEdgeMm: 4 })!
+    for (const sheet of revised.preview.result.sheets) {
+      const slots = slotsOf(sheet, { ...opts, gapMm: 2, safeEdgeMm: 4 })
+      const v = validateCutSequence(region, slots, cutsOf(sheet))
+      if (!v.ok) problems.push(`新版面不满足 guillotine：${v.reason}`)
+    }
+  }
+
+  // 安全边大到任何照片都放不下时，必须返回明确错误而不是生成坏版本
+  const impossible = previewRevision(
+    task,
+    { paperId: paper.id, gapMm: 0, kerfMm: 0.5, safeEdgeMm: 80 },
+    BUILTIN_PAPERS,
+    BUILTIN_PHOTO_SIZES,
+  )
+  if (impossible.ok) problems.push('安全边明显超界时应当阻止重排')
+
+  return {
+    id: 'revision',
+    title: '⑧ 修订重排：手工位置按新参数保留，保不住的列入清单',
+    pass: problems.length === 0,
+    detail: problems.length
+      ? problems.join('；')
+      : '隙距 0→2mm、安全边 3→4mm 后，8 个手工位置全部按新边界/间隙平移保留，丢失清单为空，新版面仍贯通；超界参数被阻止',
+    ms: Math.round(performance.now() - t0),
+  }
+}
+
 export async function runSelfTest(): Promise<AssertionResult[]> {
   const results: AssertionResult[] = []
   results.push(assertGuillotine())
@@ -501,5 +606,6 @@ export async function runSelfTest(): Promise<AssertionResult[]> {
     })
   }
   results.push(assertPerformance())
+  results.push(assertRevisionPreservation())
   return results
 }
